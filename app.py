@@ -9,24 +9,30 @@ import pandas as pd
 # --- Configuration ---
 IMAGE_URL = "https://srtaivedds.com/Images/Cameras/75B-002.0-CMS-CAM01-00001.jpg"
 
-SIGN_ORDER = [
-    {"name": "Roswell Rd",   "dist": 6.0},  
-    {"name": "Big Shanty",   "dist": 12.0}, 
-    {"name": "Hickory Grove","dist": 16.5}
+# ACTUAL DISTANCES (Southbound from Barrett Pkwy Entrance)
+# 1. Barrett -> Roswell Rd (~5.5 miles)
+# 2. Barrett -> I-285 (~11.0 miles)
+# 3. Terrell Mill is roughly 9.0 miles from Barrett (between Roswell and 285)
+
+# We map the OCR results to the VISIBLE lines on the sign.
+# The sign usually shows [Roswell Rd] (Top) and [I-285] (Bottom)
+SIGN_LOCATIONS = [
+    {"name": "Roswell Rd", "dist": 5.5},  # First price detected
+    {"name": "I-285",      "dist": 11.0}  # Second price detected
 ]
 
+# Hidden destination we want to calculate
+TERRELL_MILL_DIST = 9.0
+
 st.set_page_config(page_title="GA Express Lane Rates", page_icon="🚗", layout="wide")
-st.title("🚗 NW Corridor Toll Rates")
+st.title("🚗 NW Corridor Toll Rates (Barrett Pkwy)")
 
-# --- SIDEBAR CONTROLS ---
+# --- SIDEBAR ---
 st.sidebar.header("🔧 Calibration")
-st.sidebar.write("Tweak these if the sign is unreadable.")
-
-# Default to 160 (Day/General), but allow user to slide it
-threshold_val = st.sidebar.slider("Threshold (Dark vs Light)", 0, 255, 160, help="Lower = Thicker text. Higher = Thinner text.")
-crop_val = st.sidebar.slider("Crop Left %", 0, 80, 55, help="How much of the left side to cut off.")
-resize_factor = st.sidebar.selectbox("Resize Factor", [1, 2, 3], index=2, help="3x is smoother, 1x is raw.")
-invert_img = st.sidebar.checkbox("Invert Colors", value=True, help="Tesseract needs Black Text on White Background.")
+threshold_val = st.sidebar.slider("Threshold", 0, 255, 160)
+crop_val = st.sidebar.slider("Crop Left %", 0, 80, 55)
+resize_factor = st.sidebar.selectbox("Resize Factor", [1, 2, 3], index=2)
+invert_img = st.sidebar.checkbox("Invert Colors", value=True)
 
 def load_data():
     try:
@@ -40,38 +46,25 @@ def load_data():
         return None
 
 def process_image(img, thresh, crop_pct, resize, do_invert):
-    # 1. CROP
     w, h = img.size
-    # Convert percentage to pixel value
     left = int(w * (crop_pct / 100))
     cropped = img.crop((left, 0, w, h))
-
-    # 2. GRAYSCALE
     gray = cropped.convert('L')
-    
-    # 3. RESIZE (Bicubic for smoothness)
     w_new, h_new = gray.size
     resized = gray.resize((w_new * resize, h_new * resize), resample=Image.Resampling.BICUBIC)
-
-    # 4. THRESHOLD (Dynamic via Slider)
-    # If pixel > threshold, make it White (255), else Black (0)
     binary = resized.point(lambda x: 255 if x > thresh else 0, '1')
     
-    # 5. INVERT (Dynamic Checkbox)
     if do_invert:
         final_img = ImageOps.invert(binary.convert('L'))
     else:
         final_img = binary.convert('L')
     
-    # OCR Config
-    # Restrict to money characters to reduce noise
     custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=$0123456789.'
-    
     text = pytesseract.image_to_string(final_img, config=custom_config)
     
     return text, final_img
 
-# --- Main App Logic ---
+# --- Main Logic ---
 if st.button("🔄 Refresh Camera"):
     st.rerun()
 
@@ -82,31 +75,35 @@ if img:
     
     with col1:
         st.subheader("💰 Live Rates")
-        with st.spinner('Processing...'):
-            # Check CLOSED status on original image
+        with st.spinner('Calculating...'):
             full_text_check = pytesseract.image_to_string(img)
             
             if "CLOSED" in full_text_check.upper():
                 st.error("⛔ Southbound Toll Lanes are Closed")
             else:
-                # Run the processor with SLIDER values
                 raw_text, processed_img = process_image(img, threshold_val, crop_val, resize_factor, invert_img)
                 
-                # Regex and Parsing
-                price_pattern = re.compile(r'\$?\s?(\d*\.\d{2})')
-                matches = price_pattern.findall(raw_text)
+                # Regex for prices
+                matches = re.findall(r'\$?\s?(\d*\.\d{2})', raw_text)
                 
                 data = []
+                avg_rate_per_mile = 0.10 # fallback default
+                
+                # 1. Process Visible Signs
                 for i, price_str in enumerate(matches):
-                    if i < len(SIGN_ORDER):
+                    if i < len(SIGN_LOCATIONS):
                         try:
                             if price_str.startswith('.'): price_str = "0" + price_str
                             val = float(price_str)
                             if val > 20.0: continue 
 
-                            dest = SIGN_ORDER[i]
+                            dest = SIGN_LOCATIONS[i]
                             per_mile = val / dest['dist']
                             
+                            # If this is the I-285 price (longest trip), use it as the "True Rate"
+                            if dest['name'] == "I-285":
+                                avg_rate_per_mile = per_mile
+
                             data.append({
                                 "Destination": dest['name'],
                                 "Price": f"${val:.2f}",
@@ -115,20 +112,24 @@ if img:
                         except ValueError:
                             continue
                 
+                # 2. Calculate Hidden Destination (Terrell Mill)
+                # Only add if we found at least one price to base the rate on
                 if data:
+                    terrell_price = avg_rate_per_mile * TERRELL_MILL_DIST
+                    # Insert it in the middle (Index 1)
+                    data.insert(1, {
+                        "Destination": "Terrell Mill (Calc)",
+                        "Price": f"${terrell_price:.2f}",
+                        "$/Mile": f"${avg_rate_per_mile:.2f}"
+                    })
+
                     df = pd.DataFrame(data)
                     st.dataframe(df, hide_index=True, use_container_width=True)
                 else:
                     st.warning("No rates detected.")
-                    st.caption("Try adjusting the Threshold slider in the sidebar.")
 
     with col2:
         st.subheader("👁️ Debug View")
-        # Show what the computer sees so you can tune the slider
         if 'processed_img' in locals():
-            st.image(processed_img, caption=f"Threshold: {threshold_val} | Crop: {crop_val}%", use_container_width=True)
-            st.text("Raw OCR Output:")
+            st.image(processed_img, caption=f"Debug Feed", use_container_width=True)
             st.code(raw_text)
-        
-        with st.expander("View Original Camera Feed"):
-            st.image(img, use_container_width=True)
