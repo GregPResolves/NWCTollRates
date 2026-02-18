@@ -42,7 +42,7 @@ def process_image(img):
     # Preprocessing
     gray = img.convert('L')
     # Simple thresholding to isolate bright text
-    bw = gray.point(lambda x: 0 if x < 150 else 255, '1')
+    bw = gray.point(lambda x: 0 if x < 200 else 255, '1')
     
     # OCR
     custom_config = r'--oem 3 --psm 6'
