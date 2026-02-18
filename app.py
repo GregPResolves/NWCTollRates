@@ -9,20 +9,29 @@ import pandas as pd
 # --- Configuration ---
 IMAGE_URL = "https://srtaivedds.com/Images/Cameras/75B-002.0-CMS-CAM01-00001.jpg"
 
-# KNOWN ORDER (Top to Bottom)
 SIGN_ORDER = [
     {"name": "Roswell Rd",   "dist": 6.0},  
     {"name": "Big Shanty",   "dist": 12.0}, 
     {"name": "Hickory Grove","dist": 16.5}
 ]
 
-st.set_page_config(page_title="GA Express Lane Rates", page_icon="🚗")
+st.set_page_config(page_title="GA Express Lane Rates", page_icon="🚗", layout="wide")
 st.title("🚗 NW Corridor Toll Rates")
+
+# --- SIDEBAR CONTROLS ---
+st.sidebar.header("🔧 Calibration")
+st.sidebar.write("Tweak these if the sign is unreadable.")
+
+# Default to 160 (Day/General), but allow user to slide it
+threshold_val = st.sidebar.slider("Threshold (Dark vs Light)", 0, 255, 160, help="Lower = Thicker text. Higher = Thinner text.")
+crop_val = st.sidebar.slider("Crop Left %", 0, 80, 55, help="How much of the left side to cut off.")
+resize_factor = st.sidebar.selectbox("Resize Factor", [1, 2, 3], index=2, help="3x is smoother, 1x is raw.")
+invert_img = st.sidebar.checkbox("Invert Colors", value=True, help="Tesseract needs Black Text on White Background.")
 
 def load_data():
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(IMAGE_URL, headers=headers, timeout=10)
+        response = requests.get(IMAGE_URL, headers=headers, timeout=5)
         response.raise_for_status()
         img = Image.open(BytesIO(response.content))
         return img
@@ -30,36 +39,32 @@ def load_data():
         st.error(f"Error loading image: {e}")
         return None
 
-def process_image(img):
+def process_image(img, thresh, crop_pct, resize, do_invert):
     # 1. CROP
-    # Focus strictly on the price column to reduce noise
     w, h = img.size
-    cropped = img.crop((int(w * 0.55), 0, w, h))
+    # Convert percentage to pixel value
+    left = int(w * (crop_pct / 100))
+    cropped = img.crop((left, 0, w, h))
 
     # 2. GRAYSCALE
     gray = cropped.convert('L')
     
-    # 3. SMART RESIZE (The "Natural Blur" Trick)
-    # Instead of a filter, we resize 3x using BICUBIC. 
-    # Bicubic naturally interpolates pixels, bridging the gaps between LED dots
-    # while keeping the shape of the number intact.
-    # Note: We do this BEFORE thresholding.
+    # 3. RESIZE (Bicubic for smoothness)
     w_new, h_new = gray.size
-    resized = gray.resize((w_new * 3, h_new * 3), resample=Image.Resampling.BICUBIC)
+    resized = gray.resize((w_new * resize, h_new * resize), resample=Image.Resampling.BICUBIC)
 
-    # 4. THRESHOLD
-    # Now we cut out the background.
-    # Since we smoothed it with Bicubic, the dots are now soft grey blobs.
-    # Thresholding them now creates clean, connected lines.
-    # 160 is a safe middle ground. Adjust up (e.g. 200) if text is still too thick.
-    binary = resized.point(lambda x: 255 if x > 160 else 0, '1')
+    # 4. THRESHOLD (Dynamic via Slider)
+    # If pixel > threshold, make it White (255), else Black (0)
+    binary = resized.point(lambda x: 255 if x > thresh else 0, '1')
     
-    # 5. INVERT
-    # Tesseract wants black text on white background.
-    final_img = ImageOps.invert(binary.convert('L'))
+    # 5. INVERT (Dynamic Checkbox)
+    if do_invert:
+        final_img = ImageOps.invert(binary.convert('L'))
+    else:
+        final_img = binary.convert('L')
     
     # OCR Config
-    # We restrict to money characters.
+    # Restrict to money characters to reduce noise
     custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=$0123456789.'
     
     text = pytesseract.image_to_string(final_img, config=custom_config)
@@ -67,24 +72,27 @@ def process_image(img):
     return text, final_img
 
 # --- Main App Logic ---
+if st.button("🔄 Refresh Camera"):
+    st.rerun()
+
 img = load_data()
 
 if img:
-    tab1, tab2 = st.tabs(["💰 Rates", "🛠️ Debug View"])
+    col1, col2 = st.columns([1, 1])
     
-    with tab1:
-        if st.button("Refresh"):
-            st.rerun()
+    with col1:
+        st.subheader("💰 Live Rates")
+        with st.spinner('Processing...'):
+            # Check CLOSED status on original image
+            full_text_check = pytesseract.image_to_string(img)
             
-        with st.spinner('Processing LED Sign...'):
-            full_text = pytesseract.image_to_string(img)
-            
-            if "CLOSED" in full_text.upper():
-                st.error("Southbound Toll Lanes are Closed")
+            if "CLOSED" in full_text_check.upper():
+                st.error("⛔ Southbound Toll Lanes are Closed")
             else:
-                raw_text, processed_img = process_image(img)
+                # Run the processor with SLIDER values
+                raw_text, processed_img = process_image(img, threshold_val, crop_val, resize_factor, invert_img)
                 
-                # Regex matches: $0.50, .50, 0.50
+                # Regex and Parsing
                 price_pattern = re.compile(r'\$?\s?(\d*\.\d{2})')
                 matches = price_pattern.findall(raw_text)
                 
@@ -92,12 +100,8 @@ if img:
                 for i, price_str in enumerate(matches):
                     if i < len(SIGN_ORDER):
                         try:
-                            # Fix empty leading digits (e.g. ".50" -> "0.50")
-                            if price_str.startswith('.'):
-                                price_str = "0" + price_str
-                                
+                            if price_str.startswith('.'): price_str = "0" + price_str
                             val = float(price_str)
-                            
                             if val > 20.0: continue 
 
                             dest = SIGN_ORDER[i]
@@ -112,18 +116,19 @@ if img:
                             continue
                 
                 if data:
-                    st.success(f"Found {len(data)} rates")
                     df = pd.DataFrame(data)
                     st.dataframe(df, hide_index=True, use_container_width=True)
                 else:
-                    st.warning("Could not read numbers clearly.")
-                    st.info("Check the 'Debug View' tab.")
+                    st.warning("No rates detected.")
+                    st.caption("Try adjusting the Threshold slider in the sidebar.")
 
-    with tab2:
-        st.write("### What the computer sees:")
-        st.write("Using 'Bicubic' resizing to smooth dots naturally without making them fat.")
+    with col2:
+        st.subheader("👁️ Debug View")
+        # Show what the computer sees so you can tune the slider
         if 'processed_img' in locals():
-            st.image(processed_img, caption="Processed Image sent to OCR", use_container_width=True)
-        st.write("### Raw Text Output:")
-        if 'raw_text' in locals():
+            st.image(processed_img, caption=f"Threshold: {threshold_val} | Crop: {crop_val}%", use_container_width=True)
+            st.text("Raw OCR Output:")
             st.code(raw_text)
+        
+        with st.expander("View Original Camera Feed"):
+            st.image(img, use_container_width=True)
