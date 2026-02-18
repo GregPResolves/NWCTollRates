@@ -30,11 +30,9 @@ def load_data():
     try:
         # 1. Fetch Image
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # Add a timestamp to URL to prevent caching if needed, usually requests doesn't cache by default
         response = requests.get(IMAGE_URL, headers=headers, timeout=10)
         response.raise_for_status()
         img = Image.open(BytesIO(response.content))
-        
         return img
     except Exception as e:
         st.error(f"Error loading image: {e}")
@@ -47,7 +45,6 @@ def process_image(img):
     bw = gray.point(lambda x: 0 if x < 130 else 255, '1')
     
     # OCR
-    # psm 6 assumes a single uniform block of text
     custom_config = r'--oem 3 --psm 6'
     text = pytesseract.image_to_string(bw, config=custom_config)
     
@@ -57,7 +54,7 @@ def process_image(img):
 img = load_data()
 
 if img:
-    # Create tabs for clean view
+    # Create tabs
     tab1, tab2 = st.tabs(["💰 Rates", "📷 Source Image"])
     
     with tab2:
@@ -67,38 +64,45 @@ if img:
         with st.spinner('Analyzing sign text...'):
             raw_text, processed_img = process_image(img)
             
-            # Parsing Logic
-            lines = raw_text.split('\n')
-            data = []
-            price_pattern = re.compile(r'\$?\s?(\d+\.\d{2})')
-
-            for line in lines:
-                line_upper = line.upper().strip()
-                for key, miles in DISTANCES_MILES.items():
-                    if key in line_upper:
-                        price_match = price_pattern.search(line)
-                        if price_match:
-                            price = float(price_match.group(1))
-                            per_mile = price / miles if miles > 0 else 0
-                            data.append({
-                                "Destination": key,
-                                "Price": f"${price:.2f}",
-                                "Distance": f"{miles} mi",
-                                "$/Mile": f"${per_mile:.2f}"
-                            })
-                        break
+            # --- NEW LOGIC FOR CLOSED SIGNS ---
+            if "CLOSED" in raw_text.upper():
+                st.error("Southbound Toll Lanes are Closed")
+                st.caption("The sign currently indicates the lanes are not open for this direction.")
             
-            if data:
-                df = pd.DataFrame(data)
-                st.dataframe(df, hide_index=True, use_container_width=True)
-                
-                # Highlight best value (optional)
-                # st.success(f"Current variable rate is roughly {data[0]['$/Mile']} per mile.")
+            # --- EXISTING LOGIC FOR RATES ---
             else:
-                st.warning("Could not read rates from the sign right now.")
-                st.text("Raw OCR Output for debugging:")
-                st.code(raw_text)
-                st.image(processed_img, caption="Processed Image for OCR", width=300)
+                lines = raw_text.split('\n')
+                data = []
+                price_pattern = re.compile(r'\$?\s?(\d+\.\d{2})')
+
+                for line in lines:
+                    line_upper = line.upper().strip()
+                    for key, miles in DISTANCES_MILES.items():
+                        if key in line_upper:
+                            price_match = price_pattern.search(line)
+                            if price_match:
+                                price = float(price_match.group(1))
+                                per_mile = price / miles if miles > 0 else 0
+                                data.append({
+                                    "Destination": key,
+                                    "Price": f"${price:.2f}",
+                                    "Distance": f"{miles} mi",
+                                    "$/Mile": f"${per_mile:.2f}"
+                                })
+                            break
+                
+                if data:
+                    df = pd.DataFrame(data)
+                    st.dataframe(df, hide_index=True, use_container_width=True)
+                else:
+                    # If it's not closed, but we found no data, show warning
+                    st.warning("Could not read rates from the sign right now.")
+                    
+                    # Optional: Expander to see what the computer "saw"
+                    with st.expander("See debug info"):
+                        st.text("Raw OCR Output:")
+                        st.code(raw_text)
+                        st.image(processed_img, caption="Processed Image", width=300)
 
     if st.button('Refresh Data'):
         st.rerun()
