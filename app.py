@@ -41,7 +41,7 @@ def process_image(img):
     # 3. Threshold (High Contrast)
     # Everything darker than 100 becomes black (text), everything lighter becomes white.
     # Adjust 100 up or down if text is too thin or too thick.
-    bw = inverted.point(lambda x: 0 if x < 90 else 255, '1')
+    bw = inverted.point(lambda x: 0 if x < 110 else 255, '1')
     
     # 4. Resize (2x is usually enough, 3x can be too much noise)
     width, height = bw.size
