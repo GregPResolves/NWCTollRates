@@ -31,37 +31,35 @@ def load_data():
         return None
 
 def process_image(img):
-    # 1. CROP: Focus on the right side.
-    # We use 0.5 (50%) to be safe. 
-    # This keeps the numbers but cuts out the "Destination" text.
+    # 1. CROP
+    # Focus strictly on the price column to reduce noise
     w, h = img.size
-    cropped = img.crop((int(w * 0.5), 0, w, h))
+    cropped = img.crop((int(w * 0.55), 0, w, h))
 
     # 2. GRAYSCALE
     gray = cropped.convert('L')
     
-    # 3. HIGH THRESHOLD (The Anti-Glow Step)
-    # LED signs have a "halo" or glow that confuses the computer.
-    # By setting the threshold HIGH (200), we only keep the bright center of the LED dots.
-    # 0 = Black, 255 = White.
-    binary = gray.point(lambda x: 255 if x > 200 else 0, '1')
-    
-    # 4. DILATION (The "Connect-the-Dots" Step)
-    # MaxFilter looks at neighbors and picks the brightest one.
-    # This expands the white dots until they touch, forming solid letters.
-    # Size 3 is usually perfect for this.
-    thickened = binary.filter(ImageFilter.MaxFilter(3))
+    # 3. SMART RESIZE (The "Natural Blur" Trick)
+    # Instead of a filter, we resize 3x using BICUBIC. 
+    # Bicubic naturally interpolates pixels, bridging the gaps between LED dots
+    # while keeping the shape of the number intact.
+    # Note: We do this BEFORE thresholding.
+    w_new, h_new = gray.size
+    resized = gray.resize((w_new * 3, h_new * 3), resample=Image.Resampling.BICUBIC)
+
+    # 4. THRESHOLD
+    # Now we cut out the background.
+    # Since we smoothed it with Bicubic, the dots are now soft grey blobs.
+    # Thresholding them now creates clean, connected lines.
+    # 160 is a safe middle ground. Adjust up (e.g. 200) if text is still too thick.
+    binary = resized.point(lambda x: 255 if x > 160 else 0, '1')
     
     # 5. INVERT
-    # Tesseract needs Black text on White background.
-    inverted = ImageOps.invert(thickened.convert('L'))
-    
-    # 6. RESIZE
-    # Blow it up 2x so Tesseract sees the details.
-    final_img = inverted.resize((w * 2, h * 2), resample=Image.Resampling.NEAREST)
+    # Tesseract wants black text on white background.
+    final_img = ImageOps.invert(binary.convert('L'))
     
     # OCR Config
-    # We restrict the character set strictly to money-related characters
+    # We restrict to money characters.
     custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=$0123456789.'
     
     text = pytesseract.image_to_string(final_img, config=custom_config)
@@ -79,7 +77,6 @@ if img:
             st.rerun()
             
         with st.spinner('Processing LED Sign...'):
-            # Check CLOSED status on the original full image
             full_text = pytesseract.image_to_string(img)
             
             if "CLOSED" in full_text.upper():
@@ -101,7 +98,6 @@ if img:
                                 
                             val = float(price_str)
                             
-                            # Filter out bad reads (Tolls over $20 are unlikely errors)
                             if val > 20.0: continue 
 
                             dest = SIGN_ORDER[i]
@@ -125,9 +121,9 @@ if img:
 
     with tab2:
         st.write("### What the computer sees:")
-        st.write("We are keeping only the brightest pixels (dots) and then expanding them to touch.")
+        st.write("Using 'Bicubic' resizing to smooth dots naturally without making them fat.")
         if 'processed_img' in locals():
             st.image(processed_img, caption="Processed Image sent to OCR", use_container_width=True)
         st.write("### Raw Text Output:")
         if 'raw_text' in locals():
-            st.code(raw_text)
+            st.
