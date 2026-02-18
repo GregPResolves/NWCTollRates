@@ -31,30 +31,42 @@ def load_data():
         return None
 
 def process_image(img):
-    # 1. Convert to Greyscale
-    gray = img.convert('L')
+    # 1. CROP: Focus ONLY on the right side where prices are.
+    # The image is 352px wide. Prices are usually in the right 40%.
+    # This removes the "Express Lanes" noise completely.
+    width, height = img.size
+    # Crop box: (left_x, top_y, right_x, bottom_y)
+    cropped = img.crop((int(width * 0.6), 0, width, height))
+
+    # 2. GRAYSCALE
+    gray = cropped.convert('L')
     
-    # 2. Invert immediately (Make text black, background white)
-    # This is critical because "Erosion" works on the BLACK part of the image.
-    inverted = ImageOps.invert(gray)
+    # 3. GLARE REDUCTION (Crucial Step)
+    # MinFilter looks at a 3x3 pixel area and picks the DARKEST pixel.
+    # Since text is bright and background is dark, this "eats away" the bright glow.
+    # It makes the text thinner and separates the merged numbers.
+    eroded = gray.filter(ImageFilter.MinFilter(3))
     
-    # 3. Threshold (High Contrast)
-    # Everything darker than 100 becomes black (text), everything lighter becomes white.
-    # Adjust 100 up or down if text is too thin or too thick.
-    bw = inverted.point(lambda x: 0 if x < 100 else 255, '1')
+    # 4. INVERT
+    # Now we have thin white text on black. Invert to Black text on White.
+    inverted = ImageOps.invert(eroded)
     
-    # 4. Resize (2x is usually enough, 3x can be too much noise)
-    width, height = bw.size
-    resized = bw.resize((width * 2, height * 2), resample=Image.Resampling.LANCZOS)
+    # 5. CONTRAST STRETCH
+    # Make the darks darker and lights lighter without a hard binary threshold
+    contrast = ImageOps.autocontrast(inverted, cutoff=10)
+
+    # 6. RESIZE
+    # Double size to give Tesseract more pixels to work with
+    w, h = contrast.size
+    final_img = contrast.resize((w * 2, h * 2), resample=Image.Resampling.LANCZOS)
     
     # OCR Config
-    # --psm 6 is still best for blocks of text
-    # We remove the whitelist strictness slightly to let Tesseract "breathe"
-    custom_config = r'--oem 3 --psm 6'
+    # Whitelist numbers and symbols to stop it from reading garbage
+    custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=$0123456789.'
     
-    text = pytesseract.image_to_string(resized, config=custom_config)
+    text = pytesseract.image_to_string(final_img, config=custom_config)
     
-    return text, resized
+    return text, final_img
 
 # --- Main App Logic ---
 img = load_data()
@@ -67,63 +79,28 @@ if img:
             st.rerun()
             
         with st.spinner('Processing LED Sign...'):
-            raw_text, processed_img = process_image(img)
+            # Check for "CLOSED" on the FULL image first
+            full_text = pytesseract.image_to_string(img)
             
-            if "CLOSED" in raw_text.upper():
+            if "CLOSED" in full_text.upper():
                 st.error("Southbound Toll Lanes are Closed")
             else:
-                # Regex Strategy:
-                # 1. Look for patterns like $0.50, 0.50, .50, 1.10
-                # 2. Handle common OCR errors: 'S' instead of '$', 'O' instead of '0'
+                # Process the CROPPED image for prices
+                raw_text, processed_img = process_image(img)
                 
-                # Clean the text first to fix common LED read errors
-                clean_text = raw_text.replace("O", "0").replace("o", "0").replace("S", "$").replace("s", "$")
-                
-                # Regex: Optional $ followed by digits, dot, two digits
-                price_pattern = re.compile(r'\$?\s?(\d+\.\d{2})')
-                matches = price_pattern.findall(clean_text)
+                # Regex to find prices
+                # Matches: $0.50, .50, 0.50
+                price_pattern = re.compile(r'\$?\s?(\d*\.\d{2})')
+                matches = price_pattern.findall(raw_text)
                 
                 data = []
                 for i, price_str in enumerate(matches):
                     if i < len(SIGN_ORDER):
                         try:
+                            # Fix empty leading digits (e.g. ".50" -> "0.50")
+                            if price_str.startswith('.'):
+                                price_str = "0" + price_str
+                                
                             val = float(price_str)
                             
-                            # Sanity Logic:
-                            # If we see "50.50", it's likely "0.50" where the dollar sign was read as a 5.
-                            # If value > 10, and it ends in the same decimals as a likely toll, suspect error.
-                            if val > 15.0:
-                                # Heuristic: if it's huge, assume the first digit is a misread '$'
-                                str_val = str(val)
-                                # Try stripping the first character if the result is a valid toll format
-                                if len(str_val) >= 4: 
-                                     # e.g. "50.50" -> "0.50"
-                                     try:
-                                         val = float(str_val[1:])
-                                     except:
-                                         pass
-                            
-                            dest = SIGN_ORDER[i]
-                            per_mile = val / dest['dist']
-                            
-                            data.append({
-                                "Destination": dest['name'],
-                                "Price": f"${val:.2f}",
-                                "$/Mile": f"${per_mile:.2f}"
-                            })
-                        except ValueError:
-                            continue
-                
-                if data:
-                    st.success(f"Found {len(data)} rates")
-                    df = pd.DataFrame(data)
-                    st.dataframe(df, hide_index=True, use_container_width=True)
-                else:
-                    st.warning("Could not read numbers clearly.")
-                    st.info("Check the 'Debug View' tab.")
-
-    with tab2:
-        st.write("### What the computer sees:")
-        st.image(processed_img, caption="Processed Image sent to OCR", use_container_width=True)
-        st.write("### Raw Text Output:")
-        st.code(raw_text)
+                            # Filter out bad reads
