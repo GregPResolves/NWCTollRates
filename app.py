@@ -126,4 +126,4 @@ if img:
             st.image(processed_img, caption="Processed Image sent to OCR", use_container_width=True)
         st.write("### Raw Text Output:")
         if 'raw_text' in locals():
-            st.
+            st.code(raw_text)
