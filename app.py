@@ -104,3 +104,31 @@ if img:
                             val = float(price_str)
                             
                             # Filter out bad reads
+                            if val > 20.0: continue 
+
+                            dest = SIGN_ORDER[i]
+                            per_mile = val / dest['dist']
+                            
+                            data.append({
+                                "Destination": dest['name'],
+                                "Price": f"${val:.2f}",
+                                "$/Mile": f"${per_mile:.2f}"
+                            })
+                        except ValueError:
+                            continue
+                
+                if data:
+                    st.success(f"Found {len(data)} rates")
+                    df = pd.DataFrame(data)
+                    st.dataframe(df, hide_index=True, use_container_width=True)
+                else:
+                    st.warning("Could not read numbers clearly.")
+                    st.info("Check the 'Debug View' tab to see the cropped image.")
+
+    with tab2:
+        st.write("### What the computer sees (Cropped & Thinned):")
+        if 'processed_img' in locals():
+            st.image(processed_img, caption="Processed Image sent to OCR", use_container_width=True)
+        st.write("### Raw Text Output:")
+        if 'raw_text' in locals():
+            st.code(raw_text)
